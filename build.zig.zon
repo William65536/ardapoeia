@@ -1,0 +1,15 @@
+.{
+    .name = .ardapoeia,
+    .version = "0.1.0",
+    .fingerprint = 0xa5342cdc71326bca,
+    .minimum_zig_version = "0.15.2",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "web",
+        "lib",
+        "README.md",
+        "LICENSE",
+    },
+}
