@@ -6,12 +6,12 @@ const SampleDepth = @This();
 
 const shader_code = @embedFile("assets/shaders/sample_depth.wgsl");
 
-depth_sample_mapped: *c.WGPUBufferImpl,
-depth_sample: *c.WGPUBufferImpl,
+depth_sample_mapped: ?*c.WGPUBufferImpl = null,
+depth_sample: ?*c.WGPUBufferImpl = null,
 
-depth_sample_bg: *c.WGPUBindGroupImpl,
+depth_sample_bg: ?*c.WGPUBindGroupImpl = null,
 
-pipeline: *c.WGPUComputePipelineImpl,
+pipeline: ?*c.WGPUComputePipelineImpl = null,
 
 pub fn init(
     device: *c.WGPUDeviceImpl,
@@ -104,7 +104,18 @@ pub fn init(
     };
 }
 
-// No deinit; browser takes care of cleanup
+pub fn deinit(self: SampleDepth) void {
+    if (self.pipeline) |p| c.wgpuComputePipelineRelease(p);
+    if (self.depth_sample_bg) |dsbg| c.wgpuBindGroupRelease(dsbg);
+    if (self.depth_sample) |ds| {
+        c.wgpuBufferDestroy(ds);
+        c.wgpuBufferRelease(ds);
+    }
+    if (self.depth_sample_mapped) |dsm| {
+        c.wgpuBufferDestroy(dsm);
+        c.wgpuBufferRelease(dsm);
+    }
+}
 
 pub fn dispatch(
     self: SampleDepth,

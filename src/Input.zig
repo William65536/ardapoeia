@@ -25,8 +25,8 @@ mouse_right_down: ?struct {
 
 scroll_dy: f32 = 0.0,
 
-uniform: *c.WGPUBufferImpl = undefined,
-uniform_bg: *c.WGPUBindGroupImpl = undefined,
+uniform: ?*c.WGPUBufferImpl = null,
+uniform_bg: ?*c.WGPUBindGroupImpl = null,
 
 pub fn init(self: *Input, window: *c.GLFWwindow) void {
     var cursor_pos_x: f64 = undefined;
@@ -80,6 +80,14 @@ pub fn initGpu(self: *Input, device: *c.WGPUDeviceImpl) *c.WGPUBindGroupLayoutIm
         }) orelse @panic("ERROR: Failed to create input uniform bind group");
 
     return bg_layout;
+}
+
+pub fn deinitGpu(self: Input) void {
+    if (self.uniform_bg) |ubg| c.wgpuBindGroupRelease(ubg);
+    if (self.uniform) |u| {
+        c.wgpuBufferDestroy(u);
+        c.wgpuBufferRelease(u);
+    }
 }
 
 // No deinit; browser takes care of cleanup

@@ -7,18 +7,18 @@ const TerrainGen = @This();
 
 const shader_code = @embedFile("assets/shaders/terrain_gen.wgsl");
 
-heightmap_width: u32,
-heightmap_height: u32,
+heightmap_width: u32 = undefined,
+heightmap_height: u32 = undefined,
 
-heightmap_params: *c.WGPUBufferImpl,
-out_vertex_buffer: *c.WGPUBufferImpl,
-out_index_buffer: *c.WGPUBufferImpl,
+heightmap_params: ?*c.WGPUBufferImpl = null,
+out_vertex_buffer: ?*c.WGPUBufferImpl = null,
+out_index_buffer: ?*c.WGPUBufferImpl = null,
 
-heightmap_params_bg: *c.WGPUBindGroupImpl,
-out_buffers_bg: *c.WGPUBindGroupImpl,
+heightmap_params_bg: ?*c.WGPUBindGroupImpl = null,
+out_buffers_bg: ?*c.WGPUBindGroupImpl = null,
 
-gen_vertices_pipeline: *c.WGPUComputePipelineImpl,
-gen_indices_pipeline: *c.WGPUComputePipelineImpl,
+gen_vertices_pipeline: ?*c.WGPUComputePipelineImpl = null,
+gen_indices_pipeline: ?*c.WGPUComputePipelineImpl = null,
 
 pub fn init(
     device: *c.WGPUDeviceImpl,
@@ -196,7 +196,24 @@ pub fn init(
     };
 }
 
-// No deinit; browser takes care of cleanup
+pub fn deinit(self: TerrainGen) void {
+    if (self.gen_indices_pipeline) |gip| c.wgpuComputePipelineRelease(gip);
+    if (self.gen_vertices_pipeline) |gvp| c.wgpuComputePipelineRelease(gvp);
+    if (self.out_buffers_bg) |obbg| c.wgpuBindGroupRelease(obbg);
+    if (self.heightmap_params_bg) |hmpbg| c.wgpuBindGroupRelease(hmpbg);
+    if (self.out_index_buffer) |oib| {
+        c.wgpuBufferDestroy(oib);
+        c.wgpuBufferRelease(oib);
+    }
+    if (self.out_vertex_buffer) |ovb| {
+        c.wgpuBufferDestroy(ovb);
+        c.wgpuBufferRelease(ovb);
+    }
+    if (self.heightmap_params) |hmp| {
+        c.wgpuBufferDestroy(hmp);
+        c.wgpuBufferRelease(hmp);
+    }
+}
 
 pub fn dispatch(
     self: TerrainGen,

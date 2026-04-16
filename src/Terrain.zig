@@ -5,10 +5,10 @@ const math = util.math;
 
 const Terrain = @This();
 
-vertex_buffer: *c.WGPUBufferImpl,
-index_buffer: *c.WGPUBufferImpl,
+vertex_buffer: ?*c.WGPUBufferImpl = null,
+index_buffer: ?*c.WGPUBufferImpl = null,
 
-pipeline: *c.WGPURenderPipelineImpl,
+pipeline: ?*c.WGPURenderPipelineImpl = null,
 
 const shader_code = @embedFile("assets/shaders/terrain.wgsl");
 
@@ -100,7 +100,17 @@ pub fn init(
     };
 }
 
-// No deinit; browser takes care of cleanup
+pub fn deinit(self: Terrain) void {
+    if (self.pipeline) |p| c.wgpuRenderPipelineRelease(p);
+    if (self.index_buffer) |ib| {
+        c.wgpuBufferDestroy(ib);
+        c.wgpuBufferRelease(ib);
+    }
+    if (self.vertex_buffer) |vb| {
+        c.wgpuBufferDestroy(vb);
+        c.wgpuBufferRelease(vb);
+    }
+}
 
 pub fn render(
     self: Terrain,

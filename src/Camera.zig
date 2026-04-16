@@ -26,8 +26,8 @@ pitch_drag_start: f32 = undefined,
 // `terrain_grab != null` only if `input.mouse_middle_down != null`
 terrain_grab: ?math.Vec3 = null,
 
-uniform: *c.WGPUBufferImpl = undefined,
-uniform_bg: *c.WGPUBindGroupImpl = undefined,
+uniform: ?*c.WGPUBufferImpl = null,
+uniform_bg: ?*c.WGPUBindGroupImpl = null,
 
 pub fn update(
     self: *Camera,
@@ -174,7 +174,13 @@ pub fn initGpu(
     return bg_layout;
 }
 
-// No deinit; browser takes care of cleanup
+pub fn deinitGpu(self: Camera) void {
+    if (self.uniform_bg) |ubg| c.wgpuBindGroupRelease(ubg);
+    if (self.uniform) |u| {
+        c.wgpuBufferDestroy(u);
+        c.wgpuBufferRelease(u);
+    }
+}
 
 pub fn upload(self: Camera, queue: *c.WGPUQueueImpl, aspect: f32) void {
     const view = self.viewMat();

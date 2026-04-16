@@ -11,15 +11,16 @@ const Terrain = @import("Terrain.zig");
 
 const Application = @This();
 
-instance: *c.WGPUInstanceImpl = undefined,
-adapter: *c.WGPUAdapterImpl = undefined,
-device: *c.WGPUDeviceImpl = undefined,
-queue: *c.WGPUQueueImpl = undefined,
-surface: *c.WGPUSurfaceImpl = undefined,
+instance: ?*c.WGPUInstanceImpl = null,
+adapter: ?*c.WGPUAdapterImpl = null,
+device: ?*c.WGPUDeviceImpl = null,
+queue: ?*c.WGPUQueueImpl = null,
+surface: ?*c.WGPUSurfaceImpl = null,
 surface_format: c.WGPUTextureFormat = undefined,
 depth_texture: ?Texture = null,
 
-window: *c.GLFWwindow = undefined,
+glfw_initialized: bool = false,
+window: ?*c.GLFWwindow = null,
 window_width: u32 = undefined, // `>= 1`
 window_height: u32 = undefined, // `>= 1`
 frame_width: u32 = undefined, // `>= 1`
@@ -29,13 +30,13 @@ input: Input = .{},
 
 last_time: f64 = 0.0,
 
-sample_depth: SampleDepth = undefined,
+sample_depth: SampleDepth = .{},
 
-terrain_gen: TerrainGen = undefined,
+terrain_gen: TerrainGen = .{},
 
 camera: Camera = .{},
 
-terrain: Terrain = undefined,
+terrain: Terrain = .{},
 
 pub fn init(self: *Application, window_width: u32, window_height: u32) void {
     std.debug.assert(window_width >= 1);
@@ -109,6 +110,7 @@ fn initWindow(
     if (c.glfwInit() == c.GLFW_FALSE) {
         @panic("ERROR: GLFW initialization failed");
     }
+    self.glfw_initialized = true;
 
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
     self.window =
@@ -129,7 +131,7 @@ fn initWindow(
     self.frame_width = @intCast(frame_width);
     self.frame_height = @intCast(frame_height);
 
-    self.input.init(self.window);
+    self.input.init(self.window.?);
     self.input.attachToApp(self);
 
     self.surface =
@@ -155,10 +157,13 @@ fn initResources(
 ) void {
     // TODO: Load resources asynchronously
 
-    const input_bg_layout = self.input.initGpu(self.device);
+    const device = self.device.?;
+    const queue = self.queue.?;
+
+    const input_bg_layout = self.input.initGpu(device);
     defer c.wgpuBindGroupLayoutRelease(input_bg_layout);
 
-    self.sample_depth = SampleDepth.init(self.device, input_bg_layout, depth_texture_bg_layout);
+    self.sample_depth = SampleDepth.init(device, input_bg_layout, depth_texture_bg_layout);
 
     // Set image origins to bottom left corner
     c.stbi_set_flip_vertically_on_load(1);
@@ -188,7 +193,7 @@ fn initResources(
 
     const heightmap, const heightmap_texture_bg_layout =
         Texture.init(
-            self.device,
+            device,
             @intCast(heightmap_width),
             @intCast(heightmap_height),
             .{
@@ -207,7 +212,7 @@ fn initResources(
             heightmap_data[0..@intCast(heightmap_height * heightmap_width)],
         );
     heightmap.upload(
-        self.queue,
+        queue,
         heightmap_bytes,
         @intCast(heightmap_width),
         @intCast(heightmap_height),
@@ -215,7 +220,7 @@ fn initResources(
 
     self.terrain_gen =
         .init(
-            self.device,
+            device,
             heightmap_texture_bg_layout.?,
             @intCast(heightmap_width),
             @intCast(heightmap_height),
@@ -252,24 +257,45 @@ fn initResources(
         c.wgpuQueueSubmit(self.queue, 1, &commands);
     }
 
-    const camera_bg_layout = self.camera.initGpu(self.device);
+    const camera_bg_layout = self.camera.initGpu(device);
     defer c.wgpuBindGroupLayoutRelease(camera_bg_layout);
 
     self.terrain =
         .init(
-            self.device,
+            device,
             self.surface_format,
-            self.terrain_gen.out_vertex_buffer,
-            self.terrain_gen.out_index_buffer,
+            self.terrain_gen.out_vertex_buffer.?,
+            self.terrain_gen.out_index_buffer.?,
             camera_bg_layout,
         );
 }
 
-// No deinit; browser takes care of cleanup
+pub fn deinit(self: Application) void {
+    self.terrain.deinit();
+    self.camera.deinitGpu();
+    self.terrain_gen.deinit();
+    self.sample_depth.deinit();
+
+    self.input.deinitGpu();
+    if (self.window) |w| c.glfwDestroyWindow(w);
+    if (self.glfw_initialized) c.glfwTerminate();
+
+    if (self.depth_texture) |d| d.deinit();
+    if (self.surface) |s| c.wgpuSurfaceRelease(s);
+    if (self.queue) |q| c.wgpuQueueRelease(q);
+    if (self.device) |d| c.wgpuDeviceRelease(d);
+    if (self.adapter) |a| c.wgpuAdapterRelease(a);
+    if (self.instance) |i| c.wgpuInstanceRelease(i);
+}
 
 pub fn frame(self: *Application) void {
     std.debug.assert(self.window_width >= 1);
     std.debug.assert(self.window_height >= 1);
+
+    const instance = self.instance.?;
+    const device = self.device.?;
+    const queue = self.queue.?;
+    const depth_texture = self.depth_texture.?;
 
     const now = c.glfwGetTime();
     const dt: f32 = @floatCast(now - self.last_time);
@@ -280,10 +306,10 @@ pub fn frame(self: *Application) void {
 
     self.camera.update(self.input, self.window_width, self.window_height, dt);
 
-    self.camera.upload(self.queue, self.windowAspect());
+    self.camera.upload(queue, self.windowAspect());
 
     self.input.upload(
-        self.queue,
+        queue,
         @divExact(self.frame_width, self.window_width),
         @divExact(self.frame_height, self.window_height),
     );
@@ -323,7 +349,7 @@ pub fn frame(self: *Application) void {
                         .depthSlice = c.WGPU_DEPTH_SLICE_UNDEFINED,
                     },
                     .depthStencilAttachment = &.{
-                        .view = self.depth_texture.?.view,
+                        .view = depth_texture.view,
                         .depthLoadOp = c.WGPULoadOp_Clear,
                         .depthStoreOp = c.WGPUStoreOp_Store,
                         .depthClearValue = 0.0,
@@ -331,7 +357,7 @@ pub fn frame(self: *Application) void {
                 }) orelse @panic("ERROR: Failed to begin scene render pass");
             defer c.wgpuRenderPassEncoderRelease(pass);
 
-            self.terrain.render(pass, self.camera.uniform_bg);
+            self.terrain.render(pass, self.camera.uniform_bg.?);
 
             c.wgpuRenderPassEncoderEnd(pass);
         }
@@ -346,8 +372,8 @@ pub fn frame(self: *Application) void {
 
             self.sample_depth.dispatch(
                 pass,
-                self.input.uniform_bg,
-                self.depth_texture.?.bind_group.?,
+                self.input.uniform_bg.?,
+                depth_texture.bind_group.?,
             );
 
             c.wgpuComputePassEncoderEnd(pass);
@@ -363,7 +389,7 @@ pub fn frame(self: *Application) void {
 
     if (self.input.middleMouseButtonJustPressed()) blk: {
         const depth_sample =
-            self.sample_depth.sampleDepth(self.instance, self.device, self.queue);
+            self.sample_depth.sampleDepth(instance, device, queue);
 
         const inv_view_proj =
             self.camera.projMat(self.windowAspect()).mul(self.camera.viewMat())
@@ -442,8 +468,10 @@ fn reconfigureSurface(
     self: *Application,
     depth_texture_bg_layout_dst: ?**c.WGPUBindGroupLayoutImpl,
 ) void {
+    const device = self.device.?;
+
     c.wgpuSurfaceConfigure(self.surface, &.{
-        .device = self.device,
+        .device = device,
         .format = self.surface_format,
         .usage = c.WGPUTextureUsage_RenderAttachment,
         .width = self.frame_width,
@@ -453,7 +481,7 @@ fn reconfigureSurface(
         t.deinit();
     }
     self.depth_texture, const depth_texture_bg_layout = Texture.init(
-        self.device,
+        device,
         self.frame_width,
         self.frame_height,
         Texture.readable_depth_texture_config,

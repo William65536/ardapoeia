@@ -4,6 +4,7 @@ const Application = @import("Application.zig");
 
 pub fn main() !void {
     globals.app.init(750, 500);
+    _ = c.atexit(deinitCallback);
     c.emscripten_set_main_loop_arg(
         frameCallback,
         &globals.app,
@@ -15,6 +16,10 @@ pub fn main() !void {
 fn frameCallback(arg: ?*anyopaque) callconv(.c) void {
     const app: *Application = @ptrCast(@alignCast(arg.?));
     app.frame();
+}
+
+fn deinitCallback() callconv(.c) void {
+    globals.app.deinit();
 }
 
 // `app` must outlive `main()` since `emscripten_set_main_loop_arg` returns
