@@ -1,81 +1,127 @@
-struct HeightmapParams {
-    width: u32,
-    height: u32,
-    elev_min: f32,
-    elev_max: f32,
-};
+struct LodLeaf {
+    origin: vec2f,
+    data: u32,
+    sample_slot: u32,
+}
+
+struct HeightSample {
+    normal: vec3f,
+    height: f32,
+}
 
 @group(0) @binding(0)
-var heightmap: texture_2d<u32>;
+var<storage, read> lod_leaves: array<LodLeaf>;
 @group(1) @binding(0)
-var<uniform> hp: HeightmapParams;
-@group(2) @binding(0)
-var<storage, read_write> vertices: array<f32>;
+var<storage, read_write> height_samples: array<HeightSample>;
 
-const m_per_px = 30;
+const lod_leaf_extent_span = 32; // must be power of 2
+const lod_base_extent = 0.0625; // must be power of 2
 
-fn getHeight(ix: i32, iy: i32) -> f32 {
-    let x = clamp(ix, 0, i32(hp.width) - 1);
-    let y = clamp(iy, 0, i32(hp.height) - 1);
+const height_samples_per_leaf =
+    (lod_leaf_extent_span + 1) * (lod_leaf_extent_span + 1);
 
-    let raw = textureLoad(heightmap, vec2(u32(x), u32(y)), 0).r;
-    return f32(raw) / 65534.0 * (hp.elev_max - hp.elev_min) + hp.elev_min;
-}
-
-@compute @workgroup_size(16, 16)
-fn genVertices(@builtin(global_invocation_id) id: vec3u) {
-    if hp.width <= id.x || hp.height <= id.y {
+@compute @workgroup_size(256, 1, 1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+    let local_idx = id.x;
+    if (local_idx >= height_samples_per_leaf) {
         return;
     }
+    let leaf_idx = id.y;
 
-    let x = i32(id.x);
-    let y = i32(id.y);
+    let samples_per_leaf = u32((lod_leaf_extent_span + 1) * (lod_leaf_extent_span + 1));
+    let grid_x = local_idx % u32(lod_leaf_extent_span + 1);
+    let grid_z = local_idx / u32(lod_leaf_extent_span + 1);
 
-    let h = getHeight(x, y);
+    let leaf = lod_leaves[leaf_idx];
+    let level = leaf.data & 0x1f;
+    let unit = lod_base_extent * f32(1 << level);
+    let offset = leaf.origin - vec2(0.5) * f32(lod_leaf_extent_span) * unit;
 
-    let h_l = getHeight(x - 1, y);
-    let h_r = getHeight(x + 1, y);
-    let h_b = getHeight(x, y - 1);
-    let h_t = getHeight(x, y + 1);
+    let world_x = f32(grid_x) * unit + offset.x;
+    let world_z = f32(grid_z) * unit + offset.y;
 
-    // Derivative calculations are incorrect for edges;
-    // multiplication by 2.0 should be removed, but this is ignored
-    let dx = (h_r - h_l) / (2.0 * f32(m_per_px));
-    let dz = (h_t - h_b) / (2.0 * f32(m_per_px));
+    let height = sampleHeight(world_x, world_z);
+    let normal = computeNormal(world_x, world_z);
 
-    let pos = vec3(f32(id.x) * f32(m_per_px), h, f32(id.y) * f32(m_per_px));
+    let sample_idx = leaf.sample_slot * u32(height_samples_per_leaf) + local_idx;
 
-    let normal = normalize(vec3(-dx, 1.0, -dz));
-
-    let i = (id.y * hp.width + id.x) * 6;
-
-    vertices[i + 0] = pos.x;
-    vertices[i + 1] = pos.y;
-    vertices[i + 2] = pos.z;
-    vertices[i + 3] = normal.x;
-    vertices[i + 4] = normal.y;
-    vertices[i + 5] = normal.z;
+    height_samples[sample_idx] = HeightSample(normal, height);
 }
 
-@group(2) @binding(1)
-var<storage, read_write> indices: array<u32>;
+fn sampleHeight(x: f32, z: f32) -> f32 {
+    let scale = 1.0 / 2048.0;
+    var height = 0.0;
+    height += noise(0, vec3f(x * scale, z * scale, 0.0)) * 400.0;
+    height += noise(1, vec3f(x * scale * 2.0, z * scale * 2.0, 0.0)) * 200.0;
+    height += noise(2, vec3f(x * scale * 4.0, z * scale * 4.0, 0.0)) * 100.0;
+    height += noise(3, vec3f(x * scale * 8.0, z * scale * 8.0, 0.0)) * 50.0;
+    height += noise(4, vec3f(x * scale * 16.0, z * scale * 16.0, 0.0)) * 25.0;
+    return height;
+}
 
-@compute @workgroup_size(16, 16)
-fn genIndices(@builtin(global_invocation_id) id: vec3u) {
-    if hp.width - 1 <= id.x || hp.height - 1 <= id.y {
-        return;
-    }
+fn computeNormal(x: f32, z: f32) -> vec3f {
+    let h = 0.125;
+    let dydx = (sampleHeight(x + h, z) - sampleHeight(x - h, z)) / (2.0 * h);
+    let dydz = (sampleHeight(x, z + h) - sampleHeight(x, z - h)) / (2.0 * h);
+    return normalize(vec3f(-dydx, 1.0, -dydz));
+}
 
-    let v_00 = id.y * hp.width + id.x;
-    let v_10 = v_00 + 1;
-    let v_01 = v_00 + hp.width;
-    let v_11 = v_01 + 1;
+// Perlin's "Improved Noise" algorithm
+fn noise(seed: u32, p: vec3f) -> f32 {
+    let p_floor = bitcast<vec3u>(vec3i(floor(p)));
 
-    let i = (id.y * (hp.width - 1) + id.x) * 6;
-    indices[i + 0] = v_00;
-    indices[i + 1] = v_10;
-    indices[i + 2] = v_11;
-    indices[i + 3] = v_11;
-    indices[i + 4] = v_01;
-    indices[i + 5] = v_00;
+    let p_mod = p - floor(p);
+
+    let p_smooth =
+        vec3(smootherstep(p_mod.x), smootherstep(p_mod.y), smootherstep(p_mod.z));
+
+    let a = hash32(seed, p_floor.x) + p_floor.y;
+    let aa = hash32(seed, a) + p_floor.z;
+    let ab = hash32(seed, a + 1) + p_floor.z;
+    let b = hash32(seed, p_floor.x + 1) + p_floor.y;
+    let ba = hash32(seed, b) + p_floor.z;
+    let bb = hash32(seed, b + 1) + p_floor.z;
+
+    let x0y0z0 = gradDot(hash32(seed, aa), p_mod);
+    let x1y0z0 = gradDot(hash32(seed, ba), p_mod - vec3(1.0, 0.0, 0.0));
+    let x0y1z0 = gradDot(hash32(seed, ab), p_mod - vec3(0.0, 1.0, 0.0));
+    let x1y1z0 = gradDot(hash32(seed, bb), p_mod - vec3(1.0, 1.0, 0.0));
+    let x0y0z1 = gradDot(hash32(seed, aa + 1), p_mod - vec3(0.0, 0.0, 1.0));
+    let x1y0z1 = gradDot(hash32(seed, ba + 1), p_mod - vec3(1.0, 0.0, 1.0));
+    let x0y1z1 = gradDot(hash32(seed, ab + 1), p_mod - vec3(0.0, 1.0, 1.0));
+    let x1y1z1 = gradDot(hash32(seed, bb + 1), p_mod - vec3(1.0, 1.0, 1.0));
+
+    let lerp_x0 = mix(x0y0z0, x1y0z0, p_smooth.x);
+    let lerp_x1 = mix(x0y1z0, x1y1z0, p_smooth.x);
+    let lerp_y0 = mix(lerp_x0, lerp_x1, p_smooth.y);
+
+    let lerp_x2 = mix(x0y0z1, x1y0z1, p_smooth.x);
+    let lerp_x3 = mix(x0y1z1, x1y1z1, p_smooth.x);
+    let lerp_y1 = mix(lerp_x2, lerp_x3, p_smooth.y);
+
+    let lerp_z = mix(lerp_y0, lerp_y1, p_smooth.z);
+
+    return clamp(lerp_z, - inverseSqrt(2.0), inverseSqrt(2.0)) / inverseSqrt(2.0);
+}
+
+// MurmurHash3
+fn hash32(seed: u32, x: u32) -> u32 {
+    var h: u32 = seed + x;
+    h ^= h >> 16;
+    h *= 0x85ebca6b;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35;
+    h ^= h >> 16;
+    return h;
+}
+
+fn smootherstep(t: f32) -> f32 {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+fn gradDot(hash: u32, p: vec3f) -> f32 {
+    let h = hash & 0xf;
+    let u = select(p.y, p.x, h < 8);
+    let v = select(select(p.z, p.x, h == 12 || h == 14), p.y, h < 4);
+    return select(-u, u, (h & 1) == 0) + select(-v, v, (h & 2) == 0);
 }

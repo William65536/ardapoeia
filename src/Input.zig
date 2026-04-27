@@ -25,8 +25,9 @@ mouse_right_down: ?struct {
 
 scroll_dy: f32 = 0.0,
 
-uniform: ?*c.WGPUBufferImpl = null,
-uniform_bg: ?*c.WGPUBindGroupImpl = null,
+initialized_count: u32 = 0,
+uniform: *c.WGPUBufferImpl = undefined,
+uniform_bg: *c.WGPUBindGroupImpl = undefined,
 
 pub fn init(self: *Input, window: *c.GLFWwindow) void {
     var cursor_pos_x: f64 = undefined;
@@ -44,12 +45,15 @@ pub const Uniform = struct {
 
 // Uniform buffer is not yet written to; call `upload` to write to it
 pub fn initGpu(self: *Input, device: *c.WGPUDeviceImpl) *c.WGPUBindGroupLayoutImpl {
+    std.debug.assert(self.initialized_count == 0);
+
     self.uniform =
         c.wgpuDeviceCreateBuffer(device, &.{
             .label = util.wgpu.stringView("input"),
             .usage = c.WGPUBufferUsage_Uniform | c.WGPUBufferUsage_CopyDst,
             .size = @sizeOf(Uniform),
         }) orelse @panic("ERROR: Failed to create input uniform buffer");
+    self.initialized_count += 1;
 
     const bg_layout =
         c.wgpuDeviceCreateBindGroupLayout(device, &.{
@@ -78,16 +82,20 @@ pub fn initGpu(self: *Input, device: *c.WGPUDeviceImpl) *c.WGPUBindGroupLayoutIm
                 .size = @sizeOf(Uniform),
             },
         }) orelse @panic("ERROR: Failed to create input uniform bind group");
+    self.initialized_count += 1;
 
     return bg_layout;
 }
 
 pub fn deinitGpu(self: Input) void {
-    if (self.uniform_bg) |ubg| c.wgpuBindGroupRelease(ubg);
-    if (self.uniform) |u| {
-        c.wgpuBufferDestroy(u);
-        c.wgpuBufferRelease(u);
-    }
+    var initialized_threshold: u32 = 0;
+    initialized_threshold += 1;
+    if (self.initialized_count < initialized_threshold) return;
+    defer c.wgpuBufferRelease(self.uniform);
+    defer c.wgpuBufferDestroy(self.uniform);
+    initialized_threshold += 1;
+    if (self.initialized_count < initialized_threshold) return;
+    defer c.wgpuBindGroupRelease(self.uniform_bg);
 }
 
 // No deinit; browser takes care of cleanup

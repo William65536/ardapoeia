@@ -3,18 +3,46 @@ const std = @import("std");
 const eps = 1.0e-6;
 
 pub const Vec2 = extern struct {
+    _alignment: u0 align(8) = 0,
     x: f32,
     y: f32,
+
+    pub const zero: Vec2 = .init(0.0, 0.0);
+
+    pub fn init(x: f32, y: f32) Vec2 {
+        return .{ .x = x, .y = y };
+    }
+
+    pub fn add(self: Vec2, other: Vec2) Vec2 {
+        return .{
+            .x = self.x + other.x,
+            .y = self.y + other.y,
+        };
+    }
+
+    pub fn scale(self: Vec2, coeff: f32) Vec2 {
+        return .{
+            .x = self.x * coeff,
+            .y = self.y * coeff,
+        };
+    }
 };
 
 pub const Vec3 = extern struct {
+    _alignment: u0 align(16) = 0,
     x: f32,
     y: f32,
     z: f32,
 
-    pub const zero: Vec3 = .{ .x = 0.0, .y = 0.0, .z = 0.0 };
+    pub const zero: Vec3 = .init(0.0, 0.0, 0.0);
 
-    pub const unit_y: Vec3 = .{ .x = 0.0, .y = 1.0, .z = 0.0 };
+    pub const unit_x: Vec3 = .init(1.0, 0.0, 0.0);
+    pub const unit_y: Vec3 = .init(0.0, 1.0, 0.0);
+    pub const unit_z: Vec3 = .init(0.0, 0.0, 1.0);
+
+    pub fn init(x: f32, y: f32, z: f32) Vec3 {
+        return .{ .x = x, .y = y, .z = z };
+    }
 
     pub fn add(self: Vec3, other: Vec3) Vec3 {
         return .{
@@ -59,13 +87,36 @@ pub const Vec3 = extern struct {
 };
 
 pub const Vec4 = extern struct {
+    _alignment: u0 align(16) = 0,
     x: f32,
     y: f32,
     z: f32,
     w: f32,
 
+    pub fn init(x: f32, y: f32, z: f32, w: f32) Vec4 {
+        return .{ .x = x, .y = y, .z = z, .w = w };
+    }
+
     pub fn xyz(self: Vec4) Vec3 {
-        return .{ .x = self.x, .y = self.y, .z = self.z };
+        return .init(self.x, self.y, self.z);
+    }
+
+    pub fn add(self: Vec4, other: Vec4) Vec4 {
+        return .{
+            .x = self.x + other.x,
+            .y = self.y + other.y,
+            .z = self.z + other.z,
+            .w = self.w + other.w,
+        };
+    }
+
+    pub fn sub(self: Vec4, other: Vec4) Vec4 {
+        return .{
+            .x = self.x - other.x,
+            .y = self.y - other.y,
+            .z = self.z - other.z,
+            .w = self.w - other.w,
+        };
     }
 };
 
@@ -183,6 +234,16 @@ pub const Mat4 = extern struct {
         }
 
         return .{ .cols = inv };
+    }
+
+    pub fn transpose(self: Mat4) Mat4 {
+        const m = self.cols;
+        return .{ .cols = .{
+            .init(m[0].x, m[1].x, m[2].x, m[3].x),
+            .init(m[0].y, m[1].y, m[2].y, m[3].y),
+            .init(m[0].z, m[1].z, m[2].z, m[3].z),
+            .init(m[0].w, m[1].w, m[2].w, m[3].w),
+        } };
     }
 };
 

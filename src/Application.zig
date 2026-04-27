@@ -5,6 +5,7 @@ const math = util.math;
 const Input = @import("Input.zig");
 const Texture = @import("util.zig").wgpu.Texture;
 const SampleDepth = @import("SampleDepth.zig");
+const Map = @import("Map.zig");
 const TerrainGen = @import("TerrainGen.zig");
 const Camera = @import("Camera.zig");
 const Terrain = @import("Terrain.zig");
@@ -28,9 +29,12 @@ frame_height: u32 = undefined, // `>= 1`
 
 input: Input = .{},
 
-last_time: f64 = 0.0,
+last_time: f64 = 0.0, // `glfwGetTime` counts from app start
+first_frame: bool = true,
 
 sample_depth: SampleDepth = .{},
+
+map: Map = .{},
 
 terrain_gen: TerrainGen = .{},
 
@@ -158,104 +162,18 @@ fn initResources(
     // TODO: Load resources asynchronously
 
     const device = self.device.?;
-    const queue = self.queue.?;
 
     const input_bg_layout = self.input.initGpu(device);
     defer c.wgpuBindGroupLayoutRelease(input_bg_layout);
 
-    self.sample_depth = SampleDepth.init(device, input_bg_layout, depth_texture_bg_layout);
+    self.sample_depth = .init(device, input_bg_layout, depth_texture_bg_layout);
 
-    // Set image origins to bottom left corner
-    c.stbi_set_flip_vertically_on_load(1);
-
-    const heightmap_meta_src: [8]u8 align(@alignOf(f32)) =
-        @embedFile("assets/textures/lauterbrunnen_dem.meta").*;
-    const heightmap_meta: extern struct { elev_min: f32, elev_max: f32 } =
-        @bitCast(heightmap_meta_src);
-
-    const heightmap_src = @embedFile("assets/textures/lauterbrunnen_dem.png");
-    var heightmap_width: c_int = undefined;
-    var heightmap_height: c_int = undefined;
-    var heightmap_channel_count: c_int = undefined;
-    const heightmap_data =
-        c.stbi_load_16_from_memory(
-            heightmap_src,
-            heightmap_src.len,
-            &heightmap_width,
-            &heightmap_height,
-            &heightmap_channel_count,
-            1,
-        ) orelse @panic("ERROR: Failed to load heightmap image");
-    defer c.stbi_image_free(heightmap_data);
-    if (heightmap_channel_count != 1) {
-        @panic("ERROR: Heightmap must be 16-bit single-channel grayscale");
-    }
-
-    const heightmap, const heightmap_texture_bg_layout =
-        Texture.init(
-            device,
-            @intCast(heightmap_width),
-            @intCast(heightmap_height),
-            .{
-                .label = "heightmap",
-                .format = c.WGPUTextureFormat_R16Uint,
-                .usage = c.WGPUTextureUsage_TextureBinding |
-                    c.WGPUTextureUsage_CopyDst,
-                .with_sampler = false,
-                .visibility = c.WGPUShaderStage_Compute,
-            },
-        );
-    defer c.wgpuBindGroupLayoutRelease(heightmap_texture_bg_layout);
-    defer heightmap.deinit();
-    const heightmap_bytes =
-        std.mem.sliceAsBytes(
-            heightmap_data[0..@intCast(heightmap_height * heightmap_width)],
-        );
-    heightmap.upload(
-        queue,
-        heightmap_bytes,
-        @intCast(heightmap_width),
-        @intCast(heightmap_height),
+    var lod_leaves_bg_layout: *c.WGPUBindGroupLayoutImpl = undefined;
+    defer c.wgpuBindGroupLayoutRelease(lod_leaves_bg_layout);
+    self.terrain_gen = .init(
+        device,
+        &lod_leaves_bg_layout,
     );
-
-    self.terrain_gen =
-        .init(
-            device,
-            heightmap_texture_bg_layout.?,
-            @intCast(heightmap_width),
-            @intCast(heightmap_height),
-            heightmap_meta.elev_min,
-            heightmap_meta.elev_max,
-        );
-
-    // Build terrain mesh from heightmap
-    {
-        const encoder =
-            c.wgpuDeviceCreateCommandEncoder(self.device, &.{
-                .label = util.wgpu.stringView("terrain gen"),
-            }) orelse
-            @panic("ERROR: Failed to create terrain gen command encoder");
-        defer c.wgpuCommandEncoderRelease(encoder);
-
-        const pass =
-            c.wgpuCommandEncoderBeginComputePass(encoder, &.{
-                .label = util.wgpu.stringView("terrain gen"),
-            }) orelse
-            @panic("ERROR: Failed to begin terrain gen compute pass");
-        defer c.wgpuComputePassEncoderRelease(pass);
-
-        self.terrain_gen.dispatch(pass, heightmap.bind_group.?);
-
-        c.wgpuComputePassEncoderEnd(pass);
-
-        const commands =
-            c.wgpuCommandEncoderFinish(encoder, &.{
-                .label = util.wgpu.stringView("terrain gen"),
-            }) orelse
-            @panic("ERROR: Failed to finish terrain gen command encoding");
-        defer c.wgpuCommandBufferRelease(commands);
-        c.wgpuQueueSubmit(self.queue, 1, &commands);
-    }
 
     const camera_bg_layout = self.camera.initGpu(device);
     defer c.wgpuBindGroupLayoutRelease(camera_bg_layout);
@@ -264,9 +182,9 @@ fn initResources(
         .init(
             device,
             self.surface_format,
-            self.terrain_gen.out_vertex_buffer.?,
-            self.terrain_gen.out_index_buffer.?,
             camera_bg_layout,
+            lod_leaves_bg_layout,
+            self.terrain_gen.height_samples,
         );
 }
 
@@ -301,12 +219,28 @@ pub fn frame(self: *Application) void {
     const dt: f32 = @floatCast(now - self.last_time);
     self.last_time = now;
 
+    const prev_frame_width = self.frame_width;
+    const prev_frame_height = self.frame_height;
+
     // Process input
     c.glfwPollEvents();
 
-    self.camera.update(self.input, self.window_width, self.window_height, dt);
+    const framebuffer_updated =
+        self.frame_width != prev_frame_width or
+        self.frame_height != prev_frame_height;
 
-    self.camera.upload(queue, self.windowAspect());
+    const camera_updated =
+        self.camera.update(
+            self.input,
+            self.window_width,
+            self.window_height,
+            dt,
+        ) or
+        self.first_frame;
+
+    if (camera_updated) {
+        self.camera.upload(queue);
+    }
 
     self.input.upload(
         queue,
@@ -328,79 +262,102 @@ pub fn frame(self: *Application) void {
         }) orelse @panic("ERROR: Failed to create surface texture view");
     defer c.wgpuTextureViewRelease(surface_view);
 
-    {
-        const encoder =
-            c.wgpuDeviceCreateCommandEncoder(self.device, &.{
-                .label = util.wgpu.stringView("scene"),
-            }) orelse @panic("ERROR: Failed to create scene command encoder");
-        defer c.wgpuCommandEncoderRelease(encoder);
+    const encoder =
+        c.wgpuDeviceCreateCommandEncoder(self.device, &.{
+            .label = util.wgpu.stringView("scene"),
+        }) orelse @panic("ERROR: Failed to create scene command encoder");
+    defer c.wgpuCommandEncoderRelease(encoder);
 
-        // Render scene
-        {
-            const pass =
-                c.wgpuCommandEncoderBeginRenderPass(encoder, &.{
-                    .label = util.wgpu.stringView("scene"),
-                    .colorAttachmentCount = 1,
-                    .colorAttachments = &.{
-                        .view = surface_view,
-                        .loadOp = c.WGPULoadOp_Clear,
-                        .storeOp = c.WGPUStoreOp_Store,
-                        .clearValue = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 },
-                        .depthSlice = c.WGPU_DEPTH_SLICE_UNDEFINED,
-                    },
-                    .depthStencilAttachment = &.{
-                        .view = depth_texture.view,
-                        .depthLoadOp = c.WGPULoadOp_Clear,
-                        .depthStoreOp = c.WGPUStoreOp_Store,
-                        .depthClearValue = 0.0,
-                    },
-                }) orelse @panic("ERROR: Failed to begin scene render pass");
-            defer c.wgpuRenderPassEncoderRelease(pass);
+    // Generate terrain
+    if (camera_updated or framebuffer_updated) {
+        // TODO: Perhaps generate every other frame or so
 
-            self.terrain.render(pass, self.camera.uniform_bg.?);
+        const pass =
+            c.wgpuCommandEncoderBeginComputePass(encoder, &.{
+                .label = util.wgpu.stringView("terrain gen"),
+            }) orelse
+            @panic("ERROR: Failed to begin terrain gen compute pass");
+        defer c.wgpuComputePassEncoderRelease(pass);
 
-            c.wgpuRenderPassEncoderEnd(pass);
-        }
+        self.terrain_gen.dispatch(
+            pass,
+            queue,
+            self.map,
+            self.camera,
+        );
 
-        if (self.input.middleMouseButtonJustPressed()) {
-            const pass =
-                c.wgpuCommandEncoderBeginComputePass(encoder, &.{
-                    .label = util.wgpu.stringView("sample depth"),
-                }) orelse
-                @panic("ERROR: Failed to begin sample depth compute pass");
-            defer c.wgpuComputePassEncoderRelease(pass);
-
-            self.sample_depth.dispatch(
-                pass,
-                self.input.uniform_bg.?,
-                depth_texture.bind_group.?,
-            );
-
-            c.wgpuComputePassEncoderEnd(pass);
-        }
-
-        const commands =
-            c.wgpuCommandEncoderFinish(encoder, &.{
-                .label = util.wgpu.stringView("scene"),
-            }) orelse @panic("ERROR: Failed to finish scene command encoding");
-        defer c.wgpuCommandBufferRelease(commands);
-        c.wgpuQueueSubmit(self.queue, 1, &commands);
+        c.wgpuComputePassEncoderEnd(pass);
     }
+
+    // Render scene
+    {
+        const pass =
+            c.wgpuCommandEncoderBeginRenderPass(encoder, &.{
+                .label = util.wgpu.stringView("scene"),
+                .colorAttachmentCount = 1,
+                .colorAttachments = &.{
+                    .view = surface_view,
+                    .loadOp = c.WGPULoadOp_Clear,
+                    .storeOp = c.WGPUStoreOp_Store,
+                    .clearValue = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 },
+                    .depthSlice = c.WGPU_DEPTH_SLICE_UNDEFINED,
+                },
+                .depthStencilAttachment = &.{
+                    .view = depth_texture.view,
+                    .depthLoadOp = c.WGPULoadOp_Clear,
+                    .depthStoreOp = c.WGPUStoreOp_Store,
+                    .depthClearValue = 0.0,
+                },
+            }) orelse @panic("ERROR: Failed to begin scene render pass");
+        defer c.wgpuRenderPassEncoderRelease(pass);
+
+        self.terrain.render(
+            pass,
+            self.camera.uniform_bg,
+            self.terrain_gen.leaves_bg,
+            self.terrain_gen.leaf_count,
+        );
+
+        c.wgpuRenderPassEncoderEnd(pass);
+    }
+
+    // Sample from depth buffer
+    if (self.input.middleMouseButtonJustPressed()) {
+        const pass =
+            c.wgpuCommandEncoderBeginComputePass(encoder, &.{
+                .label = util.wgpu.stringView("sample depth"),
+            }) orelse
+            @panic("ERROR: Failed to begin sample depth compute pass");
+        defer c.wgpuComputePassEncoderRelease(pass);
+
+        self.sample_depth.dispatch(
+            pass,
+            self.input.uniform_bg,
+            depth_texture.bind_group.?,
+        );
+
+        c.wgpuComputePassEncoderEnd(pass);
+    }
+
+    const commands =
+        c.wgpuCommandEncoderFinish(encoder, &.{
+            .label = util.wgpu.stringView("scene"),
+        }) orelse @panic("ERROR: Failed to finish scene command encoding");
+    defer c.wgpuCommandBufferRelease(commands);
+    c.wgpuQueueSubmit(self.queue, 1, &commands);
 
     if (self.input.middleMouseButtonJustPressed()) blk: {
         const depth_sample =
             self.sample_depth.sampleDepth(instance, device, queue);
 
-        const inv_view_proj =
-            self.camera.projMat(self.windowAspect()).mul(self.camera.viewMat())
-                .invert();
+        const inv_view_proj = self.camera.viewProjMat().invert();
 
         const cursor_ndc =
             self.input.cursorNdc(self.window_width, self.window_height);
 
         if (depth_sample <= 0.0) {
             const camera_ray =
-                self.camera.rayFromCursor(cursor_ndc, self.windowAspect());
+                self.camera.rayFromCursor(cursor_ndc);
             const t = camera_ray.intersectXZPlane(0.0) orelse break :blk;
             if (t < 1.0e-6) {
                 break :blk;
@@ -423,6 +380,7 @@ pub fn frame(self: *Application) void {
     }
 
     self.input.reset();
+    self.first_frame = false;
 }
 
 fn acquireSurfaceTexture(self: *Application) ?*c.WGPUTextureImpl {
@@ -466,7 +424,7 @@ fn acquireSurfaceTexture(self: *Application) ?*c.WGPUTextureImpl {
 
 fn reconfigureSurface(
     self: *Application,
-    depth_texture_bg_layout_dst: ?**c.WGPUBindGroupLayoutImpl,
+    depth_texture_bg_layout_out: ?**c.WGPUBindGroupLayoutImpl,
 ) void {
     const device = self.device.?;
 
@@ -480,15 +438,20 @@ fn reconfigureSurface(
     if (self.depth_texture) |t| {
         t.deinit();
     }
-    self.depth_texture, const depth_texture_bg_layout = Texture.init(
+    self.depth_texture = .init(
         device,
         self.frame_width,
         self.frame_height,
-        Texture.readable_depth_texture_config,
+        .{
+            .label = "depth",
+            .format = c.WGPUTextureFormat_Depth32Float,
+            .usage = c.WGPUTextureUsage_RenderAttachment |
+                c.WGPUTextureUsage_TextureBinding,
+            .with_sampler = false,
+            .visibility = c.WGPUShaderStage_Compute,
+        },
+        depth_texture_bg_layout_out,
     );
-    if (depth_texture_bg_layout_dst) |dst| {
-        dst.* = depth_texture_bg_layout.?;
-    }
 }
 
 fn requestAdapterCallback(
@@ -525,9 +488,4 @@ fn requestDeviceCallback(
 
 fn glfwErrorCallback(code: c_int, description: [*c]const u8) callconv(.c) void {
     std.debug.print("GLFW ERROR ({d}): {s}\n", .{ code, description });
-}
-
-pub fn windowAspect(self: Application) f32 {
-    return @as(f32, @floatFromInt(self.window_width)) /
-        @as(f32, @floatFromInt(self.window_height));
 }

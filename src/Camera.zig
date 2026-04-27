@@ -6,11 +6,13 @@ const Input = @import("Input.zig");
 
 const Camera = @This();
 
+aspect: f32 = undefined,
 focal_length: f32 = 1.0, // `> 0.0`
+// TODO: Center world around camera instead
 z_near: f32 = 0.01,
 z_far: f32 = 100_000.0, // `> z_near`
 
-pos: math.Vec3 = .{ .x = 7_920.0, .y = 10_000.0, .z = 11_160.0 },
+pos: math.Vec3 = .init(0.0, 1_000.0, 0.0),
 
 yaw: f32 = 0.0,
 pitch: f32 = -0.5 * std.math.pi + 1.0e-6, // in [-0.5pi + 1.0e-6, 0.5pi - 1.0e-6]
@@ -26,8 +28,9 @@ pitch_drag_start: f32 = undefined,
 // `terrain_grab != null` only if `input.mouse_middle_down != null`
 terrain_grab: ?math.Vec3 = null,
 
-uniform: ?*c.WGPUBufferImpl = null,
-uniform_bg: ?*c.WGPUBindGroupImpl = null,
+initialized_count: u32 = 0,
+uniform: *c.WGPUBufferImpl = undefined,
+uniform_bg: *c.WGPUBindGroupImpl = undefined,
 
 pub fn update(
     self: *Camera,
@@ -35,11 +38,21 @@ pub fn update(
     window_width: u32,
     window_height: u32,
     dt: f32,
-) void {
+) bool {
     std.debug.assert(window_width >= 1);
     std.debug.assert(window_height >= 1);
 
     // TODO: Add easing animations
+
+    const prev_aspect = self.aspect;
+    const prev_pos = self.pos;
+    const prev_yaw = self.yaw;
+    const prev_pitch = self.pitch;
+
+    self.aspect =
+        @as(f32, @floatFromInt(window_width)) /
+        @as(f32, @floatFromInt(window_height));
+    const cursor_ndc = input.cursorNdc(window_width, window_height);
 
     // Rotate
     if (input.mouse_right_down) |mrd| blk: {
@@ -67,18 +80,16 @@ pub fn update(
     }
 
     // Zoom
-    const aspect =
-        @as(f32, @floatFromInt(window_width)) /
-        @as(f32, @floatFromInt(window_height));
-    const cursor_ndc = input.cursorNdc(window_width, window_height);
-    const along =
-        self.rotateVec((math.Vec3{
-            .x = cursor_ndc.x * aspect,
-            .y = cursor_ndc.y,
-            .z = self.focal_length,
-        }).normalize());
-    self.pos =
-        self.pos.add(along.scale(input.scroll_dy * self.zoom_sensitivity));
+    if (input.scroll_dy != 0.0) {
+        const along =
+            self.rotateVec((math.Vec3{
+                .x = cursor_ndc.x * self.aspect,
+                .y = cursor_ndc.y,
+                .z = self.focal_length,
+            }).normalize());
+        self.pos =
+            self.pos.add(along.scale(input.scroll_dy * self.zoom_sensitivity));
+    }
 
     // Move by key press
     const forward = self.forwardVec();
@@ -116,7 +127,7 @@ pub fn update(
         self.terrain_grab = null;
     }
     if (self.terrain_grab) |tg| blk: {
-        const camera_ray = self.rayFromCursor(cursor_ndc, aspect);
+        const camera_ray = self.rayFromCursor(cursor_ndc);
         const t = camera_ray.intersectXZPlane(tg.y) orelse break :blk;
         if (t < 1.0e-6) {
             break :blk;
@@ -124,11 +135,13 @@ pub fn update(
         const intersection = camera_ray.at(t);
         self.pos = self.pos.sub(intersection.sub(tg));
     }
+
+    return self.aspect != prev_aspect or self.yaw != prev_yaw or
+        self.pitch != prev_pitch or !std.meta.eql(self.pos, prev_pos);
 }
 
 pub const Uniform = extern struct {
-    view: math.Mat4,
-    proj: math.Mat4,
+    view_proj: math.Mat4,
 };
 
 // Uniform buffer is not yet written to; call `upload` to write to it
@@ -136,12 +149,15 @@ pub fn initGpu(
     self: *Camera,
     device: *c.WGPUDeviceImpl,
 ) *c.WGPUBindGroupLayoutImpl {
+    std.debug.assert(self.initialized_count == 0);
+
     self.uniform =
         c.wgpuDeviceCreateBuffer(device, &.{
             .label = util.wgpu.stringView("camera"),
             .usage = c.WGPUBufferUsage_Uniform | c.WGPUBufferUsage_CopyDst,
             .size = @sizeOf(Uniform),
         }) orelse @panic("ERROR: Failed to create camera uniform buffer");
+    self.initialized_count += 1;
 
     const bg_layout =
         c.wgpuDeviceCreateBindGroupLayout(device, &.{
@@ -170,24 +186,26 @@ pub fn initGpu(
                 .size = @sizeOf(Uniform),
             },
         }) orelse @panic("ERROR: Failed to create camera uniform bind group");
+    self.initialized_count += 1;
 
     return bg_layout;
 }
 
 pub fn deinitGpu(self: Camera) void {
-    if (self.uniform_bg) |ubg| c.wgpuBindGroupRelease(ubg);
-    if (self.uniform) |u| {
-        c.wgpuBufferDestroy(u);
-        c.wgpuBufferRelease(u);
-    }
+    var initialized_threshold: u32 = 0;
+    initialized_threshold += 1;
+    if (self.initialized_count < initialized_threshold) return;
+    defer c.wgpuBufferRelease(self.uniform);
+    defer c.wgpuBufferDestroy(self.uniform);
+    initialized_threshold += 1;
+    if (self.initialized_count < initialized_threshold) return;
+    defer c.wgpuBindGroupRelease(self.uniform_bg);
 }
 
-pub fn upload(self: Camera, queue: *c.WGPUQueueImpl, aspect: f32) void {
-    const view = self.viewMat();
-    const proj = self.projMat(aspect);
+pub fn upload(self: Camera, queue: *c.WGPUQueueImpl) void {
+    const view_proj = self.viewProjMat();
     const uniform: Uniform = .{
-        .view = view,
-        .proj = proj,
+        .view_proj = view_proj,
     };
     c.wgpuQueueWriteBuffer(
         queue,
@@ -198,8 +216,8 @@ pub fn upload(self: Camera, queue: *c.WGPUQueueImpl, aspect: f32) void {
     );
 }
 
-pub fn rayFromCursor(self: Camera, cursor_ndc: math.Vec2, aspect: f32) math.Ray3 {
-    const inv_view_proj = self.projMat(aspect).mul(self.viewMat()).invert();
+pub fn rayFromCursor(self: Camera, cursor_ndc: math.Vec2) math.Ray3 {
+    const inv_view_proj = self.projMat().mul(self.viewMat()).invert();
 
     const near_h =
         inv_view_proj.apply(.{
@@ -234,10 +252,10 @@ pub fn viewMat(self: Camera) math.Mat4 {
     const translate: math.Mat4 = .{
         // zig fmt: off
         .cols = .{
-                .{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 0.0 },
-                .{ .x = 0.0, .y = 1.0, .z = 0.0, .w = 0.0 },
-                .{ .x = 0.0, .y = 0.0, .z = 1.0, .w = 0.0 },
-                .{ .x = dx,  .y = dy,  .z = dz,  .w = 1.0 },
+                .init(1.0, 0.0, 0.0, 0.0),
+                .init(0.0, 1.0, 0.0, 0.0),
+                .init(0.0, 0.0, 1.0, 0.0),
+                .init(dx,  dy,  dz,  1.0),
             },
         // zig fmt: on
     };
@@ -247,10 +265,10 @@ pub fn viewMat(self: Camera) math.Mat4 {
     const rotate_yaw: math.Mat4 = .{
         // zig fmt: off
         .cols = .{
-            .{ .x = cos_yaw, .y = 0.0, .z = -sin_yaw, .w = 0.0 },
-            .{ .x = 0.0,     .y = 1.0, .z = 0.0,      .w = 0.0 },
-            .{ .x = sin_yaw, .y = 0.0, .z = cos_yaw,  .w = 0.0 },
-            .{ .x = 0.0,     .y = 0.0, .z = 0.0,      .w = 1.0 },
+            .init(cos_yaw, 0.0, -sin_yaw, 0.0),
+            .init(0.0,     1.0, 0.0,      0.0),
+            .init(sin_yaw, 0.0, cos_yaw,  0.0),
+            .init(0.0,     0.0, 0.0,      1.0),
         },
         // zig fmt: on
     };
@@ -260,10 +278,10 @@ pub fn viewMat(self: Camera) math.Mat4 {
     const rotate_pitch: math.Mat4 = .{
         // zig fmt: off
         .cols = .{
-            .{ .x = 1.0, .y = 0.0,        .z = 0.0,       .w = 0.0 },
-            .{ .x = 0.0, .y = cos_pitch,  .z = sin_pitch, .w = 0.0 },
-            .{ .x = 0.0, .y = -sin_pitch, .z = cos_pitch, .w = 0.0 },
-            .{ .x = 0.0, .y = 0.0,        .z = 0.0,       .w = 1.0 },
+            .init(1.0, 0.0,        0.0,       0.0),
+            .init(0.0, cos_pitch,  sin_pitch, 0.0),
+            .init(0.0, -sin_pitch, cos_pitch, 0.0),
+            .init(0.0, 0.0,        0.0,       1.0),
         },
         // zig fmt: on
     };
@@ -271,31 +289,35 @@ pub fn viewMat(self: Camera) math.Mat4 {
     return rotate_pitch.mul(rotate_yaw.mul(translate));
 }
 
-pub fn projMat(self: Camera, aspect: f32) math.Mat4 {
-    const proj_00 = self.focal_length / aspect;
+pub fn projMat(self: Camera) math.Mat4 {
+    const proj_00 = self.focal_length / self.aspect;
     const proj_11 = self.focal_length;
     const proj_22 = self.z_near / (self.z_near - self.z_far);
     const proj_32 = -proj_22 * self.z_far;
     return .{
         // zig fmt: off
         .cols = .{
-                .{ .x = proj_00, .y = 0.0,     .z = 0.0,     .w = 0.0 },
-                .{ .x = 0.0,     .y = proj_11, .z = 0.0,     .w = 0.0 },
-                .{ .x = 0.0,     .y = 0.0,     .z = proj_22, .w = 1.0 },
-                .{ .x = 0.0,     .y = 0.0,     .z = proj_32, .w = 0.0 },
+                .init(proj_00, 0.0,     0.0,     0.0),
+                .init(0.0,     proj_11, 0.0,     0.0),
+                .init(0.0,     0.0,     proj_22, 1.0),
+                .init(0.0,     0.0,     proj_32, 0.0),
             },
         // zig fmt: on
     };
+}
+
+pub fn viewProjMat(self: Camera) math.Mat4 {
+    return self.projMat().mul(self.viewMat());
 }
 
 fn rotateVec(self: Camera, v: math.Vec3) math.Vec3 {
     const rotate_yaw: math.Mat4 = .{
         // zig fmt: off
         .cols = .{
-            .{ .x = @cos(self.yaw),  .y = 0.0, .z = @sin(self.yaw), .w = 0.0 },
-            .{ .x = 0.0,             .y = 1.0, .z = 0.0,            .w = 0.0 },
-            .{ .x = -@sin(self.yaw), .y = 0.0, .z = @cos(self.yaw), .w = 0.0 },
-            .{ .x = 0.0,             .y = 0.0, .z = 0.0,            .w = 1.0 },
+            .init(@cos(self.yaw),  0.0, @sin(self.yaw), 0.0),
+            .init(0.0,             1.0, 0.0,            0.0),
+            .init(-@sin(self.yaw), 0.0, @cos(self.yaw), 0.0),
+            .init(0.0,             0.0, 0.0,            1.0),
         },
         // zig fmt: on
     };
@@ -303,23 +325,23 @@ fn rotateVec(self: Camera, v: math.Vec3) math.Vec3 {
     const rotate_pitch: math.Mat4 = .{
         // zig fmt: off
         .cols = .{
-            .{ .x = 1.0, .y = 0.0,              .z = 0.0,               .w = 0.0 },
-            .{ .x = 0.0, .y = @cos(self.pitch), .z = -@sin(self.pitch), .w = 0.0 },
-            .{ .x = 0.0, .y = @sin(self.pitch), .z = @cos(self.pitch),  .w = 0.0 },
-            .{ .x = 0.0, .y = 0.0,              .z = 0.0,               .w = 1.0 },
+            .init(1.0, 0.0,              0.0,               0.0),
+            .init(0.0, @cos(self.pitch), -@sin(self.pitch), 0.0),
+            .init(0.0, @sin(self.pitch), @cos(self.pitch),  0.0),
+            .init(0.0, 0.0,              0.0,               1.0),
         },
         // zig fmt: on
     };
 
     const rotate = rotate_yaw.mul(rotate_pitch);
-    const rotated_v = rotate.apply(.{ .x = v.x, .y = v.y, .z = v.z, .w = 0.0 });
-    return .{ .x = rotated_v.x, .y = rotated_v.y, .z = rotated_v.z };
+    const rotated_v = rotate.apply(.init(v.x, v.y, v.z, 0.0));
+    return rotated_v.xyz();
 }
 
 fn forwardVec(self: Camera) math.Vec3 {
-    return self.rotateVec(.{ .x = 0.0, .y = 0.0, .z = 1.0 });
+    return self.rotateVec(.unit_z);
 }
 
 fn rightVec(self: Camera) math.Vec3 {
-    return self.rotateVec(.{ .x = 1.0, .y = 0.0, .z = 0.0 });
+    return self.rotateVec(.unit_x);
 }

@@ -20,21 +20,13 @@ pub const Config = struct {
     visibility: c.WGPUShaderStage,
 };
 
-pub const readable_depth_texture_config: Config = .{
-    .label = "depth",
-    .format = c.WGPUTextureFormat_Depth32Float,
-    .usage = c.WGPUTextureUsage_RenderAttachment |
-        c.WGPUTextureUsage_TextureBinding,
-    .with_sampler = false,
-    .visibility = c.WGPUShaderStage_Compute,
-};
-
 pub fn init(
     device: *c.WGPUDeviceImpl,
     width: u32,
     height: u32,
     comptime config: Config,
-) struct { Texture, ?*c.WGPUBindGroupLayoutImpl } {
+    bg_layout_out: ?**c.WGPUBindGroupLayoutImpl,
+) Texture {
     // A sampler without a binding is pointless
     std.debug.assert(!config.with_sampler or
         config.usage & c.WGPUTextureUsage_TextureBinding != 0);
@@ -75,13 +67,10 @@ pub fn init(
 
     if (config.usage & c.WGPUTextureUsage_TextureBinding == 0) {
         return .{
-            .{
-                .texture = texture,
-                .view = view,
-                .sampler = sampler,
-                .bind_group = null,
-            },
-            null,
+            .texture = texture,
+            .view = view,
+            .sampler = sampler,
+            .bind_group = null,
         };
     }
 
@@ -136,14 +125,15 @@ pub fn init(
         }) orelse @panic("ERROR: Failed to create texture bind group");
     };
 
+    if (bg_layout_out) |bgl| {
+        bgl.* = bind_group_layout;
+    }
+
     return .{
-        .{
-            .texture = texture,
-            .view = view,
-            .sampler = sampler,
-            .bind_group = bind_group,
-        },
-        bind_group_layout,
+        .texture = texture,
+        .view = view,
+        .sampler = sampler,
+        .bind_group = bind_group,
     };
 }
 
