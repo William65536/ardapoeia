@@ -10,7 +10,7 @@ aspect: f32 = undefined,
 focal_length: f32 = 1.0, // `> 0.0`
 // TODO: Center world around camera instead
 z_near: f32 = 0.01,
-z_far: f32 = 100_000.0, // `> z_near`
+z_far: f32 = 10_000_000.0, // `> z_near`
 
 pos: math.Vec3 = .init(0.0, 1_000.0, 0.0),
 
@@ -19,14 +19,23 @@ pitch: f32 = -0.5 * std.math.pi + 1.0e-6, // in [-0.5pi + 1.0e-6, 0.5pi - 1.0e-6
 
 move_speed: f32 = 5.0, // meters per second
 rotate_sensitivity: f32 = std.math.pi,
-zoom_sensitivity: f32 = 300.0,
+zoom_sensitivity_state: union(enum) {
+    none,
+    pending: struct {
+        scroll_dy: f32,
+    },
+    ready,
+} = .none,
+// Reads are valid iff `zoom_sensitivity_state == .ready`
+zoom_sensitivity: f32 = undefined,
 
 // Reads are valid iff `input.mouse_right_down != null`
 yaw_drag_start: f32 = undefined,
 pitch_drag_start: f32 = undefined,
 
-// `terrain_grab != null` only if `input.mouse_middle_down != null`
-terrain_grab: ?math.Vec3 = null,
+terrain_grab_state: enum { none, pending, ready } = .none,
+// Reads are valid iff `terrain_grab_state == .ready`
+terrain_grab: math.Vec3 = undefined,
 
 initialized_count: u32 = 0,
 uniform: *c.WGPUBufferImpl = undefined,
@@ -80,7 +89,7 @@ pub fn update(
     }
 
     // Zoom
-    if (input.scroll_dy != 0.0) {
+    if (self.zoom_sensitivity_state == .ready) {
         const along =
             self.rotateVec((math.Vec3{
                 .x = cursor_ndc.x * self.aspect,
@@ -124,9 +133,10 @@ pub fn update(
 
     // Move by panning
     if (input.mouse_middle_down == null) {
-        self.terrain_grab = null;
+        self.terrain_grab_state = .none;
     }
-    if (self.terrain_grab) |tg| blk: {
+    if (self.terrain_grab_state == .ready) blk: {
+        const tg = self.terrain_grab;
         const camera_ray = self.rayFromCursor(cursor_ndc);
         const t = camera_ray.intersectXZPlane(tg.y) orelse break :blk;
         if (t < 1.0e-6) {

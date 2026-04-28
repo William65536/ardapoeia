@@ -173,6 +173,8 @@ pub fn render(
     lod_leaves_bg: *c.WGPUBindGroupImpl,
     lod_leaf_count: u32,
 ) void {
+    if (lod_leaf_count == 0) return;
+
     c.wgpuRenderPassEncoderSetPipeline(pass, self.pipeline);
     c.wgpuRenderPassEncoderSetBindGroup(pass, 0, camera_bg, 0, null);
     c.wgpuRenderPassEncoderSetBindGroup(pass, 1, lod_leaves_bg, 0, null);

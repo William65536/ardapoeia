@@ -361,6 +361,13 @@ pub fn frame(self: *Application) void {
 
     if (self.input.middleMouseButtonJustPressed()) {
         self.sample_depth.requestSample(device, queue);
+        self.camera.terrain_grab_state = .pending;
+    }
+
+    if (self.input.scroll_dy != 0.0) {
+        self.sample_depth.requestSample(device, queue);
+        self.camera.zoom_sensitivity_state =
+            .{ .pending = .{ .scroll_dy = self.input.scroll_dy } };
     }
 
     if (self.sample_depth.pollSample(instance)) |depth_sample| blk: {
@@ -369,28 +376,37 @@ pub fn frame(self: *Application) void {
         const cursor_ndc =
             self.input.cursorNdc(self.window_width, self.window_height);
 
-        if (depth_sample <= 0.0) {
-            const camera_ray =
-                self.camera.rayFromCursor(cursor_ndc);
-            const t = camera_ray.intersectXZPlane(0.0) orelse break :blk;
-            if (t < 1.0e-6) {
-                break :blk;
-            }
-            const intersection = camera_ray.at(t);
-            self.camera.terrain_grab = intersection;
-            break :blk;
-        }
-
         const point_ndc: math.Vec4 = .{
             .x = cursor_ndc.x,
             .y = cursor_ndc.y,
             .z = depth_sample,
             .w = 1.0,
         };
-        const intersection_h = inv_view_proj.apply(point_ndc);
-        const intersection = intersection_h.xyz().scale(1.0 / intersection_h.w);
 
-        self.camera.terrain_grab = intersection;
+        const intersection =
+            if (depth_sample > 0.0) blk2: {
+                const intersection_h = inv_view_proj.apply(point_ndc);
+                break :blk2 intersection_h.xyz().scale(1.0 / intersection_h.w);
+            } else blk2: {
+                const camera_ray =
+                    self.camera.rayFromCursor(cursor_ndc);
+                const t = camera_ray.intersectXZPlane(0.0) orelse break :blk;
+                if (t < 1.0e-6) {
+                    break :blk;
+                }
+                break :blk2 camera_ray.at(t);
+            };
+
+        if (self.camera.terrain_grab_state == .pending) {
+            self.camera.terrain_grab_state = .ready;
+            self.camera.terrain_grab = intersection;
+        }
+
+        if (self.camera.zoom_sensitivity_state == .pending) {
+            const dist = intersection.sub(self.camera.pos).mag();
+            self.camera.zoom_sensitivity_state = .ready;
+            self.camera.zoom_sensitivity = dist * 0.3;
+        }
     }
 
     self.input.reset();
