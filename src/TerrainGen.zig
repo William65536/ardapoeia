@@ -13,7 +13,7 @@ const shader_code = @embedFile("assets/shaders/terrain_gen.wgsl");
 initialized_count: u32 = 0,
 
 queue: [queue_frame_max_count]QueueFrame = undefined,
-leaf_stage: [max_leaf_count]Leaf = undefined,
+leaf_staging: [max_leaf_count]Leaf = undefined,
 leaf_prev: [max_leaf_count]Leaf = undefined,
 slot_freelist: [max_leaf_count]u32 = undefined,
 slot_freelist_top: u32 = 0,
@@ -205,7 +205,7 @@ fn buildLodQuadtree(
     const view_proj = camera.viewProjMat();
 
     var prev_count: u32 = self.leaf_count;
-    @memcpy(self.leaf_prev[0..prev_count], self.leaf_stage[0..prev_count]);
+    @memcpy(self.leaf_prev[0..prev_count], self.leaf_staging[0..prev_count]);
 
     self.leaf_count = 0;
     var queue_base: u32 = 0;
@@ -260,7 +260,7 @@ fn buildLodQuadtree(
                 if (self.leaf_count + 1 > max_leaf_count) {
                     @panic("ERROR: LOD leaves overflow");
                 }
-                self.leaf_stage[self.leaf_count] = .{
+                self.leaf_staging[self.leaf_count] = .{
                     .origin = node.origin,
                     .data = .{
                         .level = level,
@@ -294,8 +294,8 @@ fn buildLodQuadtree(
         }
 
         // TODO: O(n^2) is pretty poor
-        const new_leaves = self.leaf_stage[leaf_count_before..self.leaf_count];
-        const old_leaves = self.leaf_stage[0..leaf_count_before];
+        const new_leaves = self.leaf_staging[leaf_count_before..self.leaf_count];
+        const old_leaves = self.leaf_staging[0..leaf_count_before];
         for (new_leaves) |*new_leaf| {
             for (old_leaves) |old_leaf| {
                 if (adjacent(new_leaf.*, old_leaf)) |edge| {
@@ -330,7 +330,7 @@ fn buildLodQuadtree(
     var diff_count: u32 = self.leaf_count;
     var leaf_idx: u32 = 0;
     while (leaf_idx < diff_count) {
-        const leaf = &self.leaf_stage[leaf_idx];
+        const leaf = &self.leaf_staging[leaf_idx];
 
         var prev_idx: u32 = 0;
         while (prev_idx < prev_count) : (prev_idx += 1) {
@@ -341,7 +341,7 @@ fn buildLodQuadtree(
             {
                 leaf.sample_slot = prev.sample_slot;
                 diff_count -= 1;
-                std.mem.swap(Leaf, leaf, &self.leaf_stage[diff_count]);
+                std.mem.swap(Leaf, leaf, &self.leaf_staging[diff_count]);
                 prev_count -= 1;
                 std.mem.swap(Leaf, prev, &self.leaf_prev[prev_count]);
                 break;
@@ -354,7 +354,7 @@ fn buildLodQuadtree(
     const min_count = @min(diff_count, prev_count);
 
     for (
-        self.leaf_stage[0..min_count],
+        self.leaf_staging[0..min_count],
         self.leaf_prev[0..min_count],
     ) |*leaf, prev| {
         leaf.sample_slot = prev.sample_slot;
@@ -365,7 +365,7 @@ fn buildLodQuadtree(
         self.slot_freelist_top += 1;
     }
 
-    for (self.leaf_stage[min_count..diff_count]) |*leaf| {
+    for (self.leaf_staging[min_count..diff_count]) |*leaf| {
         if (self.slot_freelist_top > 0) {
             self.slot_freelist_top -= 1;
             leaf.sample_slot = self.slot_freelist[self.slot_freelist_top];
@@ -381,7 +381,7 @@ fn buildLodQuadtree(
         queue,
         self.leaves,
         0,
-        &self.leaf_stage,
+        &self.leaf_staging,
         self.leaf_count * @sizeOf(Leaf),
     );
 

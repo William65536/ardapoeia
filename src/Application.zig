@@ -12,6 +12,7 @@ const Terrain = @import("Terrain.zig");
 
 const Application = @This();
 
+gpu_ready: bool = false,
 instance: ?*c.WGPUInstanceImpl = null,
 adapter: ?*c.WGPUAdapterImpl = null,
 device: ?*c.WGPUDeviceImpl = null,
@@ -45,68 +46,78 @@ terrain: Terrain = .{},
 pub fn init(self: *Application, window_width: u32, window_height: u32) void {
     std.debug.assert(window_width >= 1);
     std.debug.assert(window_height >= 1);
+    self.window_width = window_width;
+    self.window_height = window_height;
     self.initWgpu();
-    var depth_texture_bg_layout: *c.WGPUBindGroupLayoutImpl = undefined;
-    self.initWindow(window_width, window_height, &depth_texture_bg_layout);
-    self.initResources(depth_texture_bg_layout);
 }
 
 fn initWgpu(self: *Application) void {
     // TODO: Prevent hanging/crashing if WebGPU fails to initialize
 
     self.instance =
-        c.wgpuCreateInstance(&.{
-            .requiredFeatureCount = 1,
-            .requiredFeatures = &[_]c.WGPUInstanceFeatureName{
-                c.WGPUInstanceFeatureName_TimedWaitAny,
-            },
-        }) orelse @panic("ERROR: Failed to create instance");
+        c.wgpuCreateInstance(&.{}) orelse
+        @panic("ERROR: Failed to create instance");
 
-    const adapter_fut =
-        c.wgpuInstanceRequestAdapter(self.instance, &.{}, .{
-            .callback = requestAdapterCallback,
-            .mode = c.WGPUCallbackMode_WaitAnyOnly,
-            .userdata1 = @ptrCast(&self.adapter),
-            .userdata2 = undefined,
-        });
-    var adapter_fut_info: c.WGPUFutureWaitInfo = .{ .future = adapter_fut };
-    if (c.wgpuInstanceWaitAny(
-        self.instance,
-        1,
-        &adapter_fut_info,
-        // Infinite timeout; adapter required to proceed
-        std.math.maxInt(u64),
-    ) != c.WGPUStatus_Success) {
-        @panic("ERROR: Failed to await adapter request");
+    _ = c.wgpuInstanceRequestAdapter(self.instance, &.{}, .{
+        .callback = requestAdapterCallback,
+        .mode = c.WGPUCallbackMode_AllowProcessEvents,
+        .userdata1 = self,
+        .userdata2 = undefined,
+    });
+}
+
+fn requestAdapterCallback(
+    status: c.WGPURequestAdapterStatus,
+    adapter: c.WGPUAdapter,
+    message: c.WGPUStringView,
+    userdata1: ?*anyopaque,
+    userdata2: ?*anyopaque,
+) callconv(.c) void {
+    _ = message;
+    _ = userdata2;
+    if (status != c.WGPURequestAdapterStatus_Success) {
+        @panic("ERROR: Failed to request adapter");
     }
 
-    const device_fut =
-        c.wgpuAdapterRequestDevice(self.adapter, &.{}, .{
-            .callback = requestDeviceCallback,
-            .mode = c.WGPUCallbackMode_WaitAnyOnly,
-            .userdata1 = @ptrCast(&self.device),
-            .userdata2 = undefined,
-        });
-    var device_fut_info: c.WGPUFutureWaitInfo = .{ .future = device_fut };
-    if (c.wgpuInstanceWaitAny(
-        self.instance,
-        1,
-        &device_fut_info,
-        // Infinite timeout; device required to proceed
-        std.math.maxInt(u64),
-    ) != c.WGPUStatus_Success) {
-        @panic("ERROR: Failed to await device request");
+    const self: *Application = @ptrCast(@alignCast(userdata1.?));
+    self.adapter = adapter.?;
+
+    _ = c.wgpuAdapterRequestDevice(self.adapter, &.{}, .{
+        .callback = requestDeviceCallback,
+        .mode = c.WGPUCallbackMode_AllowProcessEvents,
+        .userdata1 = @ptrCast(self),
+        .userdata2 = undefined,
+    });
+}
+
+fn requestDeviceCallback(
+    status: c.WGPURequestDeviceStatus,
+    device: c.WGPUDevice,
+    message: c.WGPUStringView,
+    userdata1: ?*anyopaque,
+    userdata2: ?*anyopaque,
+) callconv(.c) void {
+    _ = message;
+    _ = userdata2;
+    if (status != c.WGPURequestDeviceStatus_Success) {
+        @panic("ERROR: Failed to request device");
     }
+
+    const self: *Application = @ptrCast(@alignCast(userdata1.?));
+    self.device = device.?;
 
     self.queue =
         c.wgpuDeviceGetQueue(self.device) orelse
         @panic("ERROR: Failed to get queue");
+
+    var depth_texture_bg_layout: *c.WGPUBindGroupLayoutImpl = undefined;
+    self.initWindow(&depth_texture_bg_layout);
+    self.initResources(depth_texture_bg_layout);
+    self.gpu_ready = true;
 }
 
 fn initWindow(
     self: *Application,
-    window_width: u32,
-    window_height: u32,
     depth_texture_bg_layout: **c.WGPUBindGroupLayoutImpl,
 ) void {
     _ = c.glfwSetErrorCallback(glfwErrorCallback);
@@ -119,15 +130,12 @@ fn initWindow(
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
     self.window =
         c.glfwCreateWindow(
-            @intCast(window_width),
-            @intCast(window_height),
+            @intCast(self.window_width),
+            @intCast(self.window_height),
             "Ardapoeia",
             null,
             null,
         ) orelse @panic("ERROR: Failed to create window");
-
-    self.window_width = window_width;
-    self.window_height = window_height;
 
     var frame_width: c_int = undefined;
     var frame_height: c_int = undefined;
@@ -207,6 +215,11 @@ pub fn deinit(self: Application) void {
 }
 
 pub fn frame(self: *Application) void {
+    if (!self.gpu_ready) {
+        c.wgpuInstanceProcessEvents(self.instance);
+        return;
+    }
+
     std.debug.assert(self.window_width >= 1);
     std.debug.assert(self.window_height >= 1);
 
@@ -322,7 +335,7 @@ pub fn frame(self: *Application) void {
     }
 
     // Sample from depth buffer
-    if (self.input.middleMouseButtonJustPressed()) {
+    {
         const pass =
             c.wgpuCommandEncoderBeginComputePass(encoder, &.{
                 .label = util.wgpu.stringView("sample depth"),
@@ -346,10 +359,11 @@ pub fn frame(self: *Application) void {
     defer c.wgpuCommandBufferRelease(commands);
     c.wgpuQueueSubmit(self.queue, 1, &commands);
 
-    if (self.input.middleMouseButtonJustPressed()) blk: {
-        const depth_sample =
-            self.sample_depth.sampleDepth(instance, device, queue);
+    if (self.input.middleMouseButtonJustPressed()) {
+        self.sample_depth.requestSample(device, queue);
+    }
 
+    if (self.sample_depth.pollSample(instance)) |depth_sample| blk: {
         const inv_view_proj = self.camera.viewProjMat().invert();
 
         const cursor_ndc =
@@ -452,38 +466,6 @@ fn reconfigureSurface(
         },
         depth_texture_bg_layout_out,
     );
-}
-
-fn requestAdapterCallback(
-    status: c.WGPURequestAdapterStatus,
-    adapter: c.WGPUAdapter,
-    message: c.WGPUStringView,
-    userdata1: ?*anyopaque,
-    userdata2: ?*anyopaque,
-) callconv(.c) void {
-    _ = message;
-    _ = userdata2;
-    if (status != c.WGPURequestAdapterStatus_Success) {
-        @panic("ERROR: Failed to request adapter");
-    }
-    const adapter_dst: *c.WGPUAdapter = @ptrCast(@alignCast(userdata1.?));
-    adapter_dst.* = adapter.?;
-}
-
-fn requestDeviceCallback(
-    status: c.WGPURequestDeviceStatus,
-    device: c.WGPUDevice,
-    message: c.WGPUStringView,
-    userdata1: ?*anyopaque,
-    userdata2: ?*anyopaque,
-) callconv(.c) void {
-    _ = message;
-    _ = userdata2;
-    if (status != c.WGPURequestDeviceStatus_Success) {
-        @panic("ERROR: Failed to request device");
-    }
-    const device_dst: *c.WGPUDevice = @ptrCast(@alignCast(userdata1.?));
-    device_dst.* = device.?;
 }
 
 fn glfwErrorCallback(code: c_int, description: [*c]const u8) callconv(.c) void {

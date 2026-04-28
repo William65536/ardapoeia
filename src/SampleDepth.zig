@@ -6,6 +6,8 @@ const SampleDepth = @This();
 
 const shader_code = @embedFile("assets/shaders/sample_depth.wgsl");
 
+depth_sample_ready: bool = false,
+mapped_pending: bool = false,
 depth_sample_mapped: ?*c.WGPUBufferImpl = null,
 depth_sample: ?*c.WGPUBufferImpl = null,
 
@@ -130,12 +132,13 @@ pub fn dispatch(
     c.wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
 }
 
-pub fn sampleDepth(
-    self: SampleDepth,
-    instance: *c.WGPUInstanceImpl,
+pub fn requestSample(
+    self: *SampleDepth,
     device: *c.WGPUDeviceImpl,
     queue: *c.WGPUQueueImpl,
-) f32 {
+) void {
+    if (self.mapped_pending) return;
+
     const encoder =
         c.wgpuDeviceCreateCommandEncoder(device, &.{
             .label = util.wgpu.stringView("depth sample"),
@@ -158,30 +161,25 @@ pub fn sampleDepth(
     defer c.wgpuCommandBufferRelease(commands);
     c.wgpuQueueSubmit(queue, 1, &commands);
 
-    const map_fut =
-        c.wgpuBufferMapAsync(
-            self.depth_sample_mapped,
-            c.WGPUMapMode_Read,
-            0,
-            @sizeOf(DepthSample),
-            .{
-                .mode = c.WGPUCallbackMode_WaitAnyOnly,
-                .callback = null,
-                .userdata1 = undefined,
-                .userdata2 = undefined,
-            },
-        );
-    var map_fut_info: c.WGPUFutureWaitInfo = .{ .future = map_fut };
-    if (c.wgpuInstanceWaitAny(
-        instance,
-        1,
-        &map_fut_info,
-        // Infinite timeout; adapter required to proceed
-        std.math.maxInt(u64),
-    ) != c.WGPUStatus_Success) {
-        @panic("ERROR: Failed to await depth sample buffer map");
+    _ = c.wgpuBufferMapAsync(self.depth_sample_mapped, c.WGPUMapMode_Read, 0, @sizeOf(f32), .{
+        .mode = c.WGPUCallbackMode_AllowProcessEvents,
+        .callback = mapCallback,
+        .userdata1 = self,
+        .userdata2 = undefined,
+    });
+    self.mapped_pending = true;
+}
+
+pub fn pollSample(self: *SampleDepth, instance: *c.WGPUInstanceImpl) ?f32 {
+    if (!self.mapped_pending) return null;
+
+    c.wgpuInstanceProcessEvents(instance);
+    if (!self.depth_sample_ready) return null;
+    defer {
+        self.depth_sample_ready = false;
+        self.mapped_pending = false;
+        c.wgpuBufferUnmap(self.depth_sample_mapped);
     }
-    defer c.wgpuBufferUnmap(self.depth_sample_mapped);
 
     const depth_sample: *const f32 =
         @ptrCast(@alignCast(c.wgpuBufferGetConstMappedRange(
@@ -189,8 +187,20 @@ pub fn sampleDepth(
             0,
             @sizeOf(DepthSample),
         ) orelse @panic("ERROR: Failed to get depth sample buffer mapped range")));
-
     return depth_sample.*;
+}
+
+fn mapCallback(
+    status: c.WGPURequestDeviceStatus,
+    message: c.WGPUStringView,
+    userdata1: ?*anyopaque,
+    userdata2: ?*anyopaque,
+) callconv(.c) void {
+    _ = status;
+    _ = message;
+    _ = userdata2;
+    const self: *SampleDepth = @ptrCast(@alignCast(userdata1));
+    self.depth_sample_ready = true;
 }
 
 const DepthSample = f32;

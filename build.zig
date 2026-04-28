@@ -93,7 +93,7 @@ pub fn buildWeb(b: *std.Build, optimize: std.builtin.OptimizeMode) !void {
         emcc_path,
         "-o", b.pathJoin(&.{ web_out_path, "index.html" }),
         "--use-port=emdawnwebgpu",
-        "-sASYNCIFY", "-sALLOW_MEMORY_GROWTH", "-sUSE_GLFW=3",
+        "-sALLOW_MEMORY_GROWTH", "-sUSE_GLFW=3",
         "--shell-file", "web/shell.html",
     });
     // zig fmt: on
